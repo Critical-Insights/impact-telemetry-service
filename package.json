@@ -1,0 +1,35 @@
+{
+  "name": "impact-telemetry-service",
+  "version": "0.1.0",
+  "description": "Subscribes to MQTT telemetry from a hospital device gateway, persists to TimescaleDB, and broadcasts over WebSocket. NICU monitoring POC.",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node --enable-source-maps dist/index.js",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test \"src/**/*.test.ts\"",
+    "migrate": "bash scripts/migrate-timescale.sh",
+    "publish:test-batch": "node scripts/publish-test-batch.mjs"
+  },
+  "dependencies": {
+    "dotenv": "^16.4",
+    "mqtt": "^5.10",
+    "pg": "^8.13",
+    "pino": "^9.5",
+    "pino-pretty": "^11.3",
+    "ws": "^8.18",
+    "zod": "^3.23"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/pg": "^8.11",
+    "@types/ws": "^8.5",
+    "tsx": "^4.19",
+    "typescript": "^5.6"
+  }
+}
