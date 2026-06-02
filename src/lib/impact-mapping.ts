@@ -60,9 +60,10 @@ export type FlattenResult = {
 
 export function flattenBatchToImpactRecord(
   batch: DeviceObservationBatch,
+  deviceIdOverride?: string,
 ): FlattenResult {
   const record: ImpactVitalRecord = {
-    device_id: batch.unique_device_identifier,
+    device_id: deviceIdOverride ?? batch.unique_device_identifier,
     bed_id: batch.bed_id ?? null,
     presentation_time: batch.presentation_time,
   };

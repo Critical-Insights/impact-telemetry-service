@@ -3,6 +3,8 @@ import { pool } from '../db/timescale.js';
 import { logger } from '../lib/logger.js';
 import type { ParsedTopic } from '../mqtt/topic-parser.js';
 import type { DeviceObservationBatch } from '../types/canonical.js';
+import { postObservationToImpact } from '../impact/poster.js';
+import { resolvePatientId } from '../impact/patient-resolver.js';
 
 type ObservationsTopic = Extract<ParsedTopic, { kind: 'observations' }>;
 
@@ -85,4 +87,20 @@ export async function handleObservations(
     },
     'wrote observations',
   );
+
+  try {
+    const patientId = await resolvePatientId(parsed.device_id, parsed.hospital_id);
+    const result = await postObservationToImpact(parsed.device_id, payload, patientId);
+
+    if (result.kind === 'error') {
+      logger.error({ device_id: parsed.device_id, result }, 'impact-poster: POST failed');
+    } else {
+      logger.info({ device_id: parsed.device_id, result }, 'impact-poster: result');
+    }
+  } catch (err) {
+    logger.error(
+      { device_id: parsed.device_id, err },
+      'impact-poster: unexpected error (Timescale insert already succeeded)',
+    );
+  }
 }

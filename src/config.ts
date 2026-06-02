@@ -26,6 +26,13 @@ const envSchema = z.object({
   // WebSocket broadcast
   WS_PORT: z.coerce.number().int().positive().default(8080),
   WS_SHARED_SECRET: z.string().min(1, 'WS_SHARED_SECRET is required'),
+
+  // IMPACT API (clinical backend)
+  IMPACT_API_URL: z.string().url('IMPACT_API_URL must be a valid URL'),
+  IMPACT_HOSPITAL_ID: z.string().min(1, 'IMPACT_HOSPITAL_ID is required'),
+  IMPACT_INGEST_KEY: z.string().min(1, 'IMPACT_INGEST_KEY is required'),
+  IMPACT_INGEST_MODE: z.enum(['dry-run', 'live']).default('dry-run'),
+  IMPACT_HTTP_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
 });
 
 const parsed = envSchema.safeParse(process.env);

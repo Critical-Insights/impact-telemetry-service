@@ -124,3 +124,13 @@ test('6. empty observations -> only envelope fields, unmapped empty', () => {
   });
   assert.deepEqual(unmapped, []);
 });
+
+test('7. deviceIdOverride wins over batch.unique_device_identifier', () => {
+  const { record } = flattenBatchToImpactRecord(
+    batch([ob('NOM_ECG_CARD_BEAT_RATE', 145, 'valid', 0, 'NOM_DIM_BEAT_PER_MIN')]),
+    'topic-device-id',
+  );
+  assert.equal(record.device_id, 'topic-device-id');
+  // Mapped vitals are unaffected by the override.
+  assert.equal(record.heart_rate, 145);
+});
