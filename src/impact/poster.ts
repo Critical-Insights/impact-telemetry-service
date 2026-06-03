@@ -61,10 +61,23 @@ function buildBody(
     return null;
   }
 
+  // IMPACT's vital_signs columns are integer-typed for everything except
+  // temperature. Round before send to satisfy the RPC's integer params.
+  const roundIfNumber = (v: number | null | undefined): number | null | undefined =>
+    typeof v === 'number' ? Math.round(v) : v;
+
   return {
     records: [
       {
         ...record,
+        heart_rate: roundIfNumber(record.heart_rate),
+        spo2: roundIfNumber(record.spo2),
+        rr: roundIfNumber(record.rr),
+        bp_systolic: roundIfNumber(record.bp_systolic),
+        bp_diastolic: roundIfNumber(record.bp_diastolic),
+        bp_mean: roundIfNumber(record.bp_mean),
+        fio2: roundIfNumber(record.fio2),
+        // temperature stays as-is (numeric column accepts decimals)
         patient_id: patientId,
         observed_at: batch.presentation_time,
       },
