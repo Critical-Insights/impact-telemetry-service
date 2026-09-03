@@ -1,5 +1,6 @@
 // Handles device identity messages — upsert latest-wins into device_identities.
-import { pool } from '../db/timescale.js';
+import { config } from '../config.js';
+import { getPool } from '../db/timescale.js';
 import { logger } from '../lib/logger.js';
 import type { ParsedTopic } from '../mqtt/topic-parser.js';
 import type { DeviceIdentityMessage } from '../types/canonical.js';
@@ -34,6 +35,10 @@ export async function handleIdentity(
   parsed: IdentityTopic,
   payload: DeviceIdentityMessage,
 ): Promise<void> {
+  // Timescale-only handler: nothing downstream consumes it, so with the
+  // provenance store disabled there is no work to do.
+  if (!config.TIMESCALE_ENABLED) return;
+
   if (payload.unique_device_identifier !== parsed.device_id) {
     logger.warn(
       {
@@ -44,7 +49,7 @@ export async function handleIdentity(
     );
   }
 
-  await pool.query(UPSERT_SQL, [
+  await getPool().query(UPSERT_SQL, [
     parsed.device_id,
     parsed.hospital_id,
     payload.manufacturer ?? null,

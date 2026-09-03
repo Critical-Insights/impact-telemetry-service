@@ -3,6 +3,7 @@ import { config } from './config.js';
 import { logger } from './lib/logger.js';
 import { initDb, shutdownDb } from './db/timescale.js';
 import { startMqtt, shutdownMqtt } from './mqtt/client.js';
+import { startHeartbeat, stopHeartbeat } from './impact/ingest-health.js';
 
 const require = createRequire(import.meta.url);
 const pkg = require('../package.json') as { version: string };
@@ -13,6 +14,7 @@ async function shutdown(signal: string): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   logger.info({ signal }, 'shutting down');
+  stopHeartbeat();
   try {
     await shutdownMqtt();
   } catch (err) {
@@ -35,10 +37,26 @@ async function main(): Promise<void> {
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
 
-  await initDb();
-  logger.info('connected to timescale');
+  // Four states, four unambiguous lines — a deliberate skip must never be
+  // mistakable for a silent misconfiguration. (Enabled-but-no-URL is already
+  // fatal at config parse; enabled-but-unreachable stays fatal here.)
+  if (config.TIMESCALE_ENABLED) {
+    await initDb();
+    logger.info('connected to timescale');
+  } else {
+    logger.warn(
+      'TIMESCALE DISABLED (TIMESCALE_ENABLED=false) — observations will NOT be '
+      + 'written to the time-series store. Supabase via the IMPACT API is the '
+      + 'ONLY sink this run. Set TIMESCALE_ENABLED=true to restore the '
+      + 'provenance copy.',
+    );
+  }
 
   await startMqtt();
+
+  // Whole-feed summary on an interval. In an 18-month unattended run this is
+  // the line that tells silence apart from a dead subscriber.
+  startHeartbeat();
 
   // TODO: wire up WebSocket server.
   // Keep the process alive until a termination signal arrives.

@@ -1,6 +1,7 @@
 // Handles device connectivity events — append-on-change into
 // device_connectivity_events, idempotent against retained-message replay.
-import { pool } from '../db/timescale.js';
+import { config } from '../config.js';
+import { getPool } from '../db/timescale.js';
 import { logger } from '../lib/logger.js';
 import type { ParsedTopic } from '../mqtt/topic-parser.js';
 import type { DeviceConnectivityMessage } from '../types/canonical.js';
@@ -33,6 +34,10 @@ export async function handleConnectivity(
   parsed: ConnectivityTopic,
   payload: DeviceConnectivityMessage,
 ): Promise<void> {
+  // Timescale-only handler: nothing downstream consumes it, so with the
+  // provenance store disabled there is no work to do.
+  if (!config.TIMESCALE_ENABLED) return;
+
   if (payload.unique_device_identifier !== parsed.device_id) {
     logger.warn(
       {
@@ -43,7 +48,7 @@ export async function handleConnectivity(
     );
   }
 
-  const client = await pool.connect();
+  const client = await getPool().connect();
   try {
     await client.query('BEGIN');
 

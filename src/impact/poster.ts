@@ -16,8 +16,61 @@ export type PostResult =
         body: ImpactBatchBody;
       };
     }
-  | { kind: 'success'; status: number; inserted?: number; skipped?: number }
-  | { kind: 'error'; status?: number; message: string };
+  | {
+      kind: 'success';
+      status: number;
+      inserted?: number;
+      skipped?: number;
+      // Added by the widened endpoint (Oscar, 48539b2). A 2xx carrying 0 here
+      // means the POST was accepted and the ENGINE'S copy still does not
+      // exist — `response.ok` is true for that, so it must be surfaced
+      // explicitly or it reads as a success. `undefined` means a server that
+      // predates the widen, which is a different thing from zero.
+      physiological_rows_written?: number;
+      records_failed?: number;
+      /**
+       * How many of the batch's fields were ones that BECOME
+       * physiological_data rows (spo2 / heart_rate / rr).
+       *
+       * Needed to read `physiological_rows_written: 0` correctly. A ventilator
+       * batch carries only FiO2, which is a vital_signs COLUMN and never a
+       * parameter_type — so zero rows is the CORRECT outcome there, not a
+       * stall. Without this the loudness layer would warn on every ventilator
+       * batch at 1 Hz, and an alarm that is always on is just noise.
+       */
+      physiological_fields_sent?: number;
+    }
+  | {
+      kind: 'error';
+      status?: number;
+      message: string;
+      /** Per-record `reason` codes from the 502 body, deduplicated. */
+      reasons?: string[];
+    };
+
+/**
+ * The widened endpoint's response body.
+ *
+ * It returns 201 ONLY when every record wrote completely; ANY failure is a
+ * 502 with `failures[]`. That choice matters to this file specifically: we
+ * branch on `response.ok`, which is true across all of 2xx, so a 207 partial
+ * would have been logged as a success.
+ */
+type ImpactBatchResponse = {
+  data?: {
+    inserted?: number;
+    skipped?: number;
+    physiological_rows_written?: number;
+    records_failed?: number;
+  };
+  failures?: Array<{
+    index?: number;
+    stage?: string;
+    reason?: string;
+    detail?: string;
+    code?: string;
+  }>;
+};
 
 type ImpactBatchBody = {
   records: Array<
@@ -116,6 +169,15 @@ export async function postObservationToImpact(
     return { kind: 'skipped', reason: 'no mapped vitals' };
   }
 
+  // Count the fields that are destined for physiological_data, so a zero-row
+  // response can be told apart from a batch that never had any to write.
+  const physiologicalFieldsSent = body.records.reduce((n, r) => {
+    return n
+      + (r.spo2 !== undefined && r.spo2 !== null ? 1 : 0)
+      + (r.heart_rate !== undefined && r.heart_rate !== null ? 1 : 0)
+      + (r.rr !== undefined && r.rr !== null ? 1 : 0);
+  }, 0);
+
   const url = `${config.IMPACT_API_URL}/api/v1/vitals/batch`;
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -152,31 +214,46 @@ export async function postObservationToImpact(
     clearTimeout(timeoutId);
 
     if (response.ok) {
-      // IMPACT returns { status, data: { inserted, skipped, total }, message }
-      let inserted: number | undefined;
-      let skipped: number | undefined;
+      let data: ImpactBatchResponse['data'];
       try {
-        const json = (await response.json()) as {
-          data?: { inserted?: number; skipped?: number };
-        };
-        inserted = json.data?.inserted;
-        skipped = json.data?.skipped;
+        data = ((await response.json()) as ImpactBatchResponse).data;
       } catch {
         // Body wasn't JSON or didn't have the expected shape; not fatal.
       }
-      return { kind: 'success', status: response.status, inserted, skipped };
+      return {
+        kind: 'success',
+        status: response.status,
+        inserted: data?.inserted,
+        skipped: data?.skipped,
+        physiological_rows_written: data?.physiological_rows_written,
+        records_failed: data?.records_failed,
+        physiological_fields_sent: physiologicalFieldsSent,
+      };
     }
 
+    // A failure body carries per-record `reason` codes. Lifting them out means
+    // the log names the cause — `tenant_unresolvable` or `missing_observed_at`
+    // rather than a truncated blob — and the caller-fixable ones
+    // (missing_observed_at, invalid_observed_at, validation_failed) can be
+    // told apart from ours at a glance.
     let errorBody = '';
+    let reasons: string[] | undefined;
     try {
       errorBody = await response.text();
+      const parsed = JSON.parse(errorBody) as ImpactBatchResponse;
+      const seen = (parsed.failures ?? [])
+        .map((f) => f.reason ?? f.code)
+        .filter((r): r is string => typeof r === 'string');
+      if (seen.length > 0) reasons = [...new Set(seen)];
     } catch {
-      errorBody = '<unreadable body>';
+      // Not JSON, or no failures[]; the raw body still goes in the message.
+      if (errorBody === '') errorBody = '<unreadable body>';
     }
     return {
       kind: 'error',
       status: response.status,
       message: `IMPACT returned ${response.status}: ${errorBody.slice(0, 500)}`,
+      reasons,
     };
   } catch (err) {
     clearTimeout(timeoutId);
