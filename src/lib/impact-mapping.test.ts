@@ -134,3 +134,78 @@ test('7. deviceIdOverride wins over batch.unique_device_identifier', () => {
   // Mapped vitals are unaffected by the override.
   assert.equal(record.heart_rate, 145);
 });
+
+// ── CLINICALLY MEANINGFUL ZEROS ────────────────────────────────────────────
+// Added after mutation testing: replacing `record[field] = winner.value` with
+// `winner.value || null` passed the entire suite. Nothing checked the one
+// property the study depends on most, so a future refactor toward the very
+// common `|| null` idiom would have silently deleted the readings that matter
+// and left 76 green tests behind.
+//
+// A zero here is not a missing value. It is the event being studied.
+
+test('rr = 0 (APNOEA) survives as 0 and is never coerced to null', () => {
+  const { record } = flattenBatchToImpactRecord(batch([ob('NOM_RESP_RATE', 0)]));
+  assert.equal(record.rr, 0);
+  assert.notEqual(record.rr, null);
+});
+
+test('heart_rate = 0 (ASYSTOLE) survives as 0', () => {
+  const { record } = flattenBatchToImpactRecord(
+    batch([ob('NOM_ECG_CARD_BEAT_RATE', 0)]),
+  );
+  assert.equal(record.heart_rate, 0);
+});
+
+test('spo2 = 0 survives as 0', () => {
+  const { record } = flattenBatchToImpactRecord(
+    batch([ob('NOM_PULS_OXIM_SAT_O2', 0)]),
+  );
+  assert.equal(record.spo2, 0);
+});
+
+test('a zero reading is reported, not listed as unmapped', () => {
+  // The other way to lose a zero is to treat it as "nothing to map".
+  const { record, unmapped } = flattenBatchToImpactRecord(
+    batch([ob('NOM_RESP_RATE', 0), ob('NOM_PULS_OXIM_SAT_O2', 98)]),
+  );
+  assert.equal(record.rr, 0);
+  assert.equal(record.spo2, 98);
+  assert.deepEqual(unmapped, []);
+});
+
+// ── QUALITY GATE ───────────────────────────────────────────────────────────
+// Also found by mutation: passing a non-valid reading through as a real number
+// was caught by nothing. IMPACT has no quality concept, so a lead-off ECG
+// value would be stored as though a monitor had measured it.
+
+test('a non-valid reading becomes null, never the raw value', () => {
+  const { record, unmapped } = flattenBatchToImpactRecord(
+    batch([ob('NOM_ECG_CARD_BEAT_RATE', 250, 'lead_off')]),
+  );
+  assert.equal(record.heart_rate, null);
+  assert.equal(unmapped.length, 1);
+  assert.match(unmapped[0]!.reason, /non-valid quality: lead_off/);
+});
+
+test('the quality gate applies even when the bad reading is a zero', () => {
+  // Belt and braces: a lead-off 0 must NOT be preserved by the zero rule
+  // above. Valid-zero and invalid-zero are different things.
+  const { record } = flattenBatchToImpactRecord(
+    batch([ob('NOM_RESP_RATE', 0, 'lead_off')]),
+  );
+  assert.equal(record.rr, null);
+});
+
+test('one bad-quality reading does not discard the good ones beside it', () => {
+  const { record } = flattenBatchToImpactRecord(
+    batch([
+      ob('NOM_ECG_CARD_BEAT_RATE', 250, 'lead_off'),
+      ob('NOM_RESP_RATE', 0),
+      ob('NOM_PULS_OXIM_SAT_O2', 95),
+    ]),
+  );
+  assert.equal(record.heart_rate, null);
+  assert.equal(record.rr, 0);
+  assert.equal(record.spo2, 95);
+});
