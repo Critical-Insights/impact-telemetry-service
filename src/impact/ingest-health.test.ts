@@ -1,7 +1,7 @@
 import { beforeEach, describe, it } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { config } from '../config.js';
-import { classify, record, reset, snapshot } from './ingest-health.js';
+import { classify, record, recordRefusal, reset, snapshot } from './ingest-health.js';
 import type { PostResult } from './poster.js';
 
 const DEV = 'sim-bcch-bed-01-philips-monitor';
@@ -148,5 +148,109 @@ describe('stall detection', () => {
     assert.equal(s.totals.landed, 0);
     assert.equal(s.totals.by_cause.no_patient_resolved, 2);
     assert.equal(s.totals.by_cause.dry_run_mode, 1);
+  });
+});
+
+/**
+ * The four-bucket classification.
+ *
+ * Added after running the endpoint against the real broker, which holds 57
+ * retained messages from four superseded device-naming generations. Every one
+ * registered as a device, was correctly refused as an unknown id, and then
+ * never published again — so the first version reported "8/16 devices NOT
+ * landing" and 503 for the life of the process. An alarm that is always on is
+ * the same as no alarm.
+ */
+describe('activity bucketing', () => {
+  const t0 = 1_800_000_000_000;
+  const W = config.IMPACT_UNHEALTHY_AFTER_MS;
+  const refusal: PostResult = { kind: 'skipped', reason: 'refused: unknown_device' };
+
+  it('puts an actively-publishing, non-landing device in `stalled`', () => {
+    const err: PostResult = { kind: 'error', status: 502, message: 'boom' };
+    record(DEV, err, t0);
+    // Still publishing at the far end of the window, still nothing landed.
+    record(DEV, err, t0 + W + 1000);
+    const s = snapshot(t0 + W + 1000);
+    assert.equal(s.stalled.length, 1);
+    assert.equal(s.silent.length, 0);
+    assert.equal(s.alarming, 1);
+  });
+
+  it('holds a brand-new non-landing device in `settling`, not `stalled`', () => {
+    // One failed batch is ordinary. Alarming on it would make the endpoint
+    // useless within a second of boot, which is how the grace window earns
+    // its keep — the same reason the original stall test exists.
+    record(DEV, { kind: 'error', status: 502, message: 'boom' }, t0);
+    const s = snapshot(t0);
+    assert.equal(s.settling, 1);
+    assert.equal(s.stalled.length, 0);
+    assert.equal(s.alarming, 0);
+  });
+
+  it('moves a device that STOPS publishing from stalled to `silent`', () => {
+    record(DEV, landed, t0);
+    // Nothing further arrives; well past the window it is silent, not stalled.
+    const s = snapshot(t0 + W + 1000);
+    assert.equal(s.stalled.length, 0);
+    assert.equal(s.silent.length, 1);
+    assert.equal(s.silent[0]!.device_id, DEV);
+    // Both clocks are reported: it landed once, and has been quiet since.
+    assert.equal(s.silent[0]!.never_landed, false);
+    assert.ok(s.silent[0]!.silent_for_ms >= W);
+    // A bed going quiet IS worth waking someone for.
+    assert.equal(s.alarming, 1);
+  });
+
+  it('puts a CURRENTLY-publishing unknown id in `refused`, and alarms', () => {
+    recordRefusal('bed-99-monitor', 'unknown_device', 'not in allowlist', t0);
+    const s = snapshot(t0);
+    assert.equal(s.refused.length, 1);
+    assert.equal(s.inert.length, 0);
+    // A real bed that is being refused must be loud — its data is going
+    // nowhere, and the fix is provisioning, not a restart.
+    assert.equal(s.alarming, 1);
+  });
+
+  // THE REGRESSION. A retained message arrives once at connect and never
+  // again; it must not hold the board red for the life of the process.
+  it('demotes a refused id that has stopped arriving to `inert`, NOT alarming', () => {
+    recordRefusal('dev-retained-e2e-check-01', 'unknown_device', 'retained junk', t0);
+    const s = snapshot(t0 + W + 1000);
+    assert.equal(s.refused.length, 0);
+    assert.equal(s.inert.length, 1);
+    assert.equal(s.inert[0]!.device_id, 'dev-retained-e2e-check-01');
+    assert.equal(s.alarming, 0, 'retained junk must not raise an alarm');
+  });
+
+  it('still counts inert ids in `devices` and in cause totals — ignored, not hidden', () => {
+    recordRefusal('old-generation-device', 'unknown_device', 'retained', t0);
+    const s = snapshot(t0 + W + 1000);
+    assert.equal(s.devices, 1);
+    assert.equal(s.totals.by_cause.refused_unknown_device, 1);
+  });
+
+  it('reports a healthy feed alongside inert junk as fully ok', () => {
+    // The real shape of this broker: 8 live devices landing, 8 retained ids.
+    for (let i = 1; i <= 8; i += 1) record(`bed-0${i}`, landed, t0 + W);
+    for (let i = 1; i <= 8; i += 1) {
+      recordRefusal(`junk-${i}`, 'unknown_device', 'retained', t0);
+    }
+    const s = snapshot(t0 + W);
+    assert.equal(s.devices, 16);
+    assert.equal(s.landing, 8);
+    assert.equal(s.inert.length, 8);
+    assert.equal(s.alarming, 0, 'this is the state that used to read 8/16 and 503');
+  });
+
+  it('a device refused ONCE but otherwise landing is not treated as an unknown id', () => {
+    // refusedOnly requires EVERY attempt to have been a refusal, so a known
+    // device with one odd batch stays in the normal stalled/landing logic.
+    recordRefusal(DEV, 'unknown_device', 'one-off', t0);
+    record(DEV, landed, t0 + 100);
+    const s = snapshot(t0 + 100);
+    assert.equal(s.refused.length, 0);
+    assert.equal(s.inert.length, 0);
+    assert.equal(s.landing, 1);
   });
 });

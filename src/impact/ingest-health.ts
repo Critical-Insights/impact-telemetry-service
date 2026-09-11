@@ -145,7 +145,7 @@ function dominantCause(h: DeviceHealth): StallCause | null {
 }
 
 /** What an operator should do about each cause, named so it isn't guessed at. */
-const REMEDY: Record<StallCause, string> = {
+export const REMEDY: Record<StallCause, string> = {
   refused_unknown_device:
     'this device is not in the schema-2.0 allowlist (src/mqtt/schema2-shim.ts). '
     + 'It was REFUSED, not relabelled. Add it to DEVICE_ALLOWLIST with its real '
@@ -274,26 +274,105 @@ export function recordRefusal(deviceId: string, reason: string, detail: string, 
   );
 }
 
-/** Snapshot for the periodic heartbeat and for tests. */
+/**
+ * Snapshot for the periodic heartbeat, the health endpoint, and tests.
+ *
+ * ── WHY THERE ARE FOUR BUCKETS AND NOT ONE ───────────────────────────────
+ * The first version asked one question — "has this device landed anything
+ * recently?" — and treated every no as a stall. Running it against the real
+ * broker showed why that is not good enough: the broker holds 57 RETAINED
+ * messages from four superseded naming generations, all of which are replayed
+ * to every subscriber on connect. Each one registered as a device, was
+ * correctly refused as an unknown id, and then sat in the map forever having
+ * never landed. The endpoint read `8/16 devices NOT landing` and 503 for as
+ * long as the process lived.
+ *
+ * That is the same mistake as the spurious `wrote_nothing` warnings: an alarm
+ * that is always on is indistinguishable from no alarm at all, and it would
+ * have trained whoever watches the board to ignore it before the study even
+ * started.
+ *
+ * The fix is to judge on RECENT ACTIVITY as well as on landing, which splits
+ * four genuinely different situations that need different responses:
+ *
+ *   stalled  — publishing right now, not landing. The loud one: a live bed
+ *              whose readings are being lost.
+ *   silent   — was working, has stopped publishing entirely. Also loud, and a
+ *              different fix (check the bed, the gateway, the network).
+ *   refused  — an unrecognised device id arriving right now. A provisioning
+ *              problem, not a feed problem; loud, because refusing a REAL
+ *              bed's data silently is exactly what must never happen.
+ *   inert    — an unrecognised id that arrived once and stopped. Retained
+ *              junk from a dead generation. Counted and listed, never alarmed
+ *              on, because nothing is being lost.
+ */
 export function snapshot(now = Date.now()) {
+  const window = config.IMPACT_UNHEALTHY_AFTER_MS;
   const all = [...devices.values()];
-  const stalled = all.filter(
-    (h) => (now - (h.last_success_at ?? h.first_attempt_at)) >= config.IMPACT_UNHEALTHY_AFTER_MS,
-  );
+
+  const describe = (h: DeviceHealth) => ({
+    device_id: h.device_id,
+    never_landed: h.last_success_at === null,
+    stalled_for_ms: now - (h.last_success_at ?? h.first_attempt_at),
+    /** Time since ANY batch arrived — tells `silent` apart from `stalled`. */
+    silent_for_ms: now - h.last_attempt_at,
+    dominant_cause: dominantCause(h),
+    attempts: h.attempts,
+    landed: h.landed,
+  });
+
+  const stalled: ReturnType<typeof describe>[] = [];
+  const silent: ReturnType<typeof describe>[] = [];
+  const refused: ReturnType<typeof describe>[] = [];
+  const inert: ReturnType<typeof describe>[] = [];
+  let landing = 0;
+  let settling = 0;
+
+  for (const h of all) {
+    const active = now - h.last_attempt_at < window;
+    const landedRecently =
+      h.last_success_at !== null && now - h.last_success_at < window;
+    // How long this device has gone without landing anything, measured from
+    // its last success or, if it never had one, from when it first appeared.
+    const notLandingFor = now - (h.last_success_at ?? h.first_attempt_at);
+    // "Every attempt this device ever made was refused" — i.e. the id itself
+    // is unknown, as opposed to a known device having a bad run.
+    const refusedOnly =
+      h.attempts > 0 && h.by_cause.refused_unknown_device === h.attempts;
+
+    if (refusedOnly) {
+      (active ? refused : inert).push(describe(h));
+    } else if (landedRecently) {
+      landing += 1;
+    } else if (active) {
+      // The window has to elapse before this is a stall. One skipped batch is
+      // ordinary — an unassigned bed, a batch of waveforms — and alarming on
+      // the first one would make the endpoint useless within a second of boot.
+      if (notLandingFor >= window) stalled.push(describe(h));
+      else settling += 1;
+    } else {
+      silent.push(describe(h));
+    }
+  }
+
   return {
     // A startup line scrolls away in an 18-month run, so degraded mode has to
     // be legible from any single heartbeat, not only from boot.
     timescale: config.TIMESCALE_ENABLED ? ('ok' as const) : ('disabled' as const),
     devices: all.length,
-    landing: all.length - stalled.length,
-    stalled: stalled.map((h) => ({
-      device_id: h.device_id,
-      never_landed: h.last_success_at === null,
-      stalled_for_ms: now - (h.last_success_at ?? h.first_attempt_at),
-      dominant_cause: dominantCause(h),
-      attempts: h.attempts,
-      landed: h.landed,
-    })),
+    landing,
+    /**
+     * Publishing, nothing landed yet, still inside the window. Deliberately
+     * neither healthy nor alarming — this is the state every device passes
+     * through on the way to its first success.
+     */
+    settling,
+    stalled,
+    silent,
+    refused,
+    inert,
+    /** Everything that warrants waking someone, in one number. */
+    alarming: stalled.length + silent.length + refused.length,
     totals: all.reduce(
       (acc, h) => {
         acc.attempts += h.attempts;
@@ -338,10 +417,18 @@ export function startHeartbeat(): void {
       logger.warn('ingest-health: no device has published an observation batch yet');
       return;
     }
-    if (s.stalled.length > 0) {
-      logger.error(s, `ingest-health: ${s.stalled.length}/${s.devices} device(s) NOT landing in Supabase`);
+    if (s.alarming > 0) {
+      const parts = [
+        s.stalled.length > 0 ? `${s.stalled.length} stalled` : null,
+        s.silent.length > 0 ? `${s.silent.length} silent` : null,
+        s.refused.length > 0 ? `${s.refused.length} refused` : null,
+      ].filter(Boolean).join(', ');
+      logger.error(s, `ingest-health: ${s.landing} landing, ${parts}`);
     } else {
-      logger.info(s, `ingest-health: ${s.landing}/${s.devices} device(s) landing`);
+      // `inert` is mentioned only when present, and never as a fault: it is
+      // retained broker junk, not a bed losing data.
+      const tail = s.inert.length > 0 ? ` (${s.inert.length} inert retained id(s) ignored)` : '';
+      logger.info(s, `ingest-health: ${s.landing}/${s.landing} device(s) landing${tail}`);
     }
   }, config.IMPACT_HEARTBEAT_MS);
   heartbeat.unref();

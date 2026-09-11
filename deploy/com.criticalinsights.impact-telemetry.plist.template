@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd unit for impact-telemetry-service.
+
+  WHY THIS FILE EXISTS
+  The subscriber has died twice by being started from an interactive session:
+  the session ended, the process went with it, and nothing noticed for days
+  while the monitors kept publishing to no one. A feed that stops the moment
+  its operator walks away cannot underwrite an 18-month study, however well it
+  ingests while it is up.
+
+  NOTE ON SECRETS — this file deliberately carries NONE.
+  `src/config.ts` does `import 'dotenv/config'`, which reads `.env` relative to
+  the process working directory, so setting WorkingDirectory below is the
+  entire mechanism by which MQTT_PASSWORD and IMPACT_INGEST_KEY reach the
+  service. Putting them in EnvironmentVariables here would copy live
+  credentials into a plist that is world-readable by default, and would then
+  need re-editing on every key rotation. Keep `.env` at 0600 and this file
+  secret-free.
+
+  Placeholders are substituted by deploy/install-launchd.sh:
+    __LABEL__    __NODE__    __REPO__    __LOG_DIR__
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>__LABEL__</string>
+
+    <!-- Absolute path, because a launchd job gets a minimal PATH and will not
+         find an nvm-managed node. The installer bakes in whichever node it
+         resolved; a node upgrade that moves the binary requires a reinstall,
+         and install-launchd.sh warns when the path looks nvm-managed. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>__NODE__</string>
+        <string>--enable-source-maps</string>
+        <string>__REPO__/dist/index.js</string>
+    </array>
+
+    <!-- This is what lets dotenv find .env. It is not cosmetic. -->
+    <key>WorkingDirectory</key>
+    <string>__REPO__</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Unconditional restart, on purpose.
+         A stray `kill` or an unhandled crash must not be able to end the
+         study's data collection quietly. The cost of that choice is that a
+         genuinely broken config crash-loops rather than staying down; the
+         ThrottleInterval below bounds the loop, and the crash is loud in the
+         log either way. To stop the service deliberately, use
+         `launchctl bootout` (see deploy/uninstall-launchd.sh), not `kill`. -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Minimum seconds between restarts. Keeps a misconfiguration to ~6
+         attempts a minute instead of a hot loop that buries the real error. -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <!-- pino writes JSONL to stdout; warnings and above also carry there.
+         These files GROW — see docs/running-unattended.md for the newsyslog
+         entry. An 18-month run at 1 Hz across 8 devices is not a small log. -->
+    <key>StandardOutPath</key>
+    <string>__LOG_DIR__/impact-telemetry.log</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/impact-telemetry.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- Secrets stay in .env (see the note above). Only non-secret
+             operational settings belong here. -->
+        <key>NODE_ENV</key>
+        <string>production</string>
+    </dict>
+</dict>
+</plist>

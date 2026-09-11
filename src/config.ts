@@ -65,6 +65,24 @@ const envSchema = z.object({
     .enum(['true', 'false'])
     .default('false')
     .transform((v) => v === 'true'),
+
+  // ── HEALTH ENDPOINT ──────────────────────────────────────────────────────
+  // The counters in ingest-health.ts already know whether the feed is landing;
+  // until now the only way to read them was to be watching stderr. An 18-month
+  // unattended run needs something that can be POLLED, so the liveness board
+  // can show the GATEWAY and not just the database — a board that infers
+  // "ingest is fine" from rows existing cannot tell a stopped subscriber from
+  // a quiet night.
+  HEALTH_ENABLED: z
+    .enum(['true', 'false'])
+    .default('true')
+    .transform((v) => v === 'true'),
+  HEALTH_PORT: z.coerce.number().int().positive().default(3036),
+  // Loopback by default, deliberately. This process runs on a machine inside a
+  // hospital network and the endpoint reports device ids and bed identifiers;
+  // binding 0.0.0.0 would publish that to the whole subnet. Set explicitly to
+  // 0.0.0.0 only when something off-box genuinely must scrape it.
+  HEALTH_BIND: z.string().default('127.0.0.1'),
 });
 
 // `TIMESCALE_URL` is required only when Timescale is enabled. Expressing that

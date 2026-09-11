@@ -1,0 +1,59 @@
+# systemd unit for the eventual hospital deployment.
+#
+# The macOS LaunchAgent in deploy/ starts at user LOGIN, which is fine for a
+# workstation but does not survive an unattended reboot. On the Linux box
+# inside the hospital network this is the unit to use: it starts at boot with
+# no session, and Restart=always covers the crash case the same way.
+#
+#   sudo cp deploy/systemd/impact-telemetry.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now impact-telemetry
+#   systemctl status impact-telemetry
+#   curl -s http://127.0.0.1:3036/health
+#
+# Adjust User, WorkingDirectory and ExecStart to the deployed paths.
+
+[Unit]
+Description=IMPACT telemetry ingest (MQTT -> IMPACT/Supabase)
+Documentation=file:///opt/impact-telemetry-service/docs/running-unattended.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=impact
+Group=impact
+
+# As with the plist, this is how dotenv finds .env — the credentials are NOT
+# in this unit file, and must not be added to it. Keep .env at 0600.
+WorkingDirectory=/opt/impact-telemetry-service
+ExecStart=/usr/bin/node --enable-source-maps dist/index.js
+
+Environment=NODE_ENV=production
+
+# Always restart. A stray signal or an unhandled crash must not be able to end
+# the study's data collection quietly. RestartSec bounds a crash-loop caused by
+# a bad config so the real error stays readable in the journal.
+Restart=always
+RestartSec=10
+
+# Do NOT wire the supervisor to /health — use /health/live if you add a check.
+# A stalled device returns 503 on /health, and restarting cannot fix an
+# unassigned bed; it would only convert one bad bed into total downtime.
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=impact-telemetry
+
+# Hardening. This process needs the network and its own directory, nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/impact-telemetry-service
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
