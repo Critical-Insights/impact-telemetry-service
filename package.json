@@ -9,6 +9,7 @@
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "dev:thr": "DOTENV_CONFIG_PATH=.env.thr tsx watch src/index.ts",
     "start": "node --enable-source-maps dist/index.js",
     "build": "tsc",
     "typecheck": "tsc --noEmit",

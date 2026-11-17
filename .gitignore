@@ -2,6 +2,10 @@ node_modules
 dist
 .env
 .env.local
+# Per-hospital env files. The .example templates ARE tracked; these hold live
+# broker passwords and ingest keys and must never be.
+.env.thr
+.env.bcch
 *.log
 .DS_Store
 .claude/settings.local.json
